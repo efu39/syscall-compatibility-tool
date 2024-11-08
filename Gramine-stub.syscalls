@@ -1,0 +1,10 @@
+setresgid
+setresuid
+getresuid
+getresgid
+setreuid
+setregid
+getrusage
+prctl
+mremap
+
