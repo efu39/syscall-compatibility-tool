@@ -19,20 +19,20 @@ def parse_arguments():
     parser.add_argument('-m', '--maintainers', nargs='*', help=argparse.SUPPRESS)
     return parser.parse_args()
 
-def load_implemented_syscalls(implement_syscalls):
+def load_implemented_syscalls(implement_syscalls_source):
     """Load supported syscalls from the Gramine syscall table file."""
     supported_syscalls = []
 
-    if not implement_syscalls:
-        print(f'Analyzing Gramine from {LIBOS_URL} ...')
-        data = urllib.request.urlopen(LIBOS_URL)
+    if "libos_table.c" in implement_syscalls_source:
+        print(f'Analyzing Gramine from {implement_syscalls_source} ...')
+        data = urllib.request.urlopen(implement_syscalls_source)
         for line in data:
             match = re.search(LIBOS_SYSCALL_PATTERN + r'(.+)', line.decode('utf-8'))
             if match:
                 supported_syscalls.append(match.group(1).replace(',', '').strip())
     else:
-        print(f'Analyzing against file {implement_syscalls} ...')
-        with open(implement_syscalls, 'r') as f:
+        print(f'Analyzing against file {implement_syscalls_source} ...')
+        with open(implement_syscalls_source, 'r') as f:
             supported_syscalls = [line.strip() for line in f if line.strip()]
     if not supported_syscalls:
         print("No supported syscalls found, check 'libos_table.c' path.")
@@ -137,8 +137,6 @@ def calculate_curve(ordered_syscalls, top_number, supported_syscalls, api_requir
 
 def main():
     args = parse_arguments()
-    
-    
 
     packages_in_api_usage = load_api_usage()
     inst_data, total_inst, effective_total_inst = load_popularity_data(args.source, args.maintainers)
@@ -157,7 +155,8 @@ def main():
         filter_packages_by_syscall(args.syscall, packages_in_api_usage, args.source, args.maintainers)
         return
     
-    supported_syscalls = load_implemented_syscalls(args.implement_syscalls)
+    implemented_syscalls_source = args.implement_syscalls if args.implement_syscalls else LIBOS_URL
+    supported_syscalls = load_implemented_syscalls(implemented_syscalls_source)
     num_implemented_syscalls = len(supported_syscalls)
     num_stubbed_syscalls = 0
     if args.stub_syscalls:
