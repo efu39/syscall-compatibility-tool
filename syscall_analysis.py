@@ -17,6 +17,7 @@ def parse_arguments():
     parser.add_argument('-c', '--syscall', action='store', help="list the packages using the syscall")
     parser.add_argument('-src', '--source', action='store', default='inst', help=argparse.SUPPRESS)
     parser.add_argument('-m', '--maintainers', nargs='*', help=argparse.SUPPRESS)
+    parser.add_argument('--type', type=str, help="static of dynamic", default="static")
     return parser.parse_args()
 
 def load_implemented_syscalls(implement_syscalls_source):
@@ -82,6 +83,12 @@ def load_ubuntu_popularity_data(filename='data/ubuntu_package_popularity.csv'):
                 inst_data[row['package_name']] = int(row['inst'])
     return inst_data, total_inst
 
+def create_dummy_unweighted_pop(applications_dict):
+    inst_data = {}
+    for key in applications_dict.keys():
+        inst_data[key] = 1
+    return inst_data, len(applications_dict)
+
 def filter_packages_by_syscall(syscall, packages_in_api_usage, source, maintainers=None):
     """Filter and print packages requiring a specific syscall."""
     popcon_packages = get_package_popularity.get_package_popularity(source)
@@ -95,7 +102,23 @@ def filter_packages_by_syscall(syscall, packages_in_api_usage, source, maintaine
                 num_packages_require_the_syscall += 1
     print(f'Number of packages requiring {syscall}: {num_packages_require_the_syscall}')
 
-def calculate_weighted_completeness(supported_syscalls, packages_in_api_usage, inst_data, total_pkg_expect, pkg_prob_dict):
+def filter_apps_by_syscall(syscall, packages_in_api_usage):
+    """Filter and print application requiring a specific syscall."""
+    works_faked_apps = []
+    used_apps = []
+    for pkg in packages_in_api_usage:
+        if syscall in packages_in_api_usage[pkg]['works faked']:
+            works_faked_apps.append(pkg)
+        elif syscall in packages_in_api_usage[pkg]['system call']:
+            used_apps.append(pkg)
+    print(f"Number of application requiring '{syscall}': {len(works_faked_apps)+len(used_apps)}")
+    if len(works_faked_apps):
+        print(f'Faked works in wrks:\n {works_faked_apps}')
+    if len(used_apps):
+        print(f'Required by wrks:\n {used_apps}')
+    
+
+def calculate_completeness_score(supported_syscalls, packages_in_api_usage, inst_data, total_pkg_expect, pkg_prob_dict):
     """Calculate the weighted completeness of syscall support."""
     total_syscalls = []
     not_supported_syscalls = []
@@ -120,54 +143,8 @@ def calculate_weighted_completeness(supported_syscalls, packages_in_api_usage, i
     weighted_completeness = 100.0 * supported_pkg_expect / total_pkg_expect
     return weighted_completeness, total_syscalls, not_supported_syscalls, supported_packages
 
-def calculate_curve(ordered_syscalls, top_number, supported_syscalls, api_required_package):
-    """Calculate and print the curve of syscall importance."""
-    top_syscalls = []
-    not_supported_count = 0
-    print(f'\nTop {top_number} not yet supported syscalls ordered by (API Importance)')
-    for s in ordered_syscalls:
-        top_syscalls.append(s[0])
-        if s[0] not in supported_syscalls:
-            if not_supported_count < top_number:
-                not_supported_count += 1
-                #print(f'{s[0]} needed by {len(api_required_package[s[0]])} packages (1 - {s[1]})')
-                print("{:<18} used in {:>4} packages ({})".format(s[0], len(api_required_package[s[0]]), s[1]))
-            else:
-                break
-
-def main():
-    args = parse_arguments()
-
-    packages_in_api_usage = load_api_usage()
-    inst_data, total_inst, effective_total_inst = load_popularity_data(args.source, args.maintainers)
-
-    api_required_package = defaultdict(list)
-    pkg_prob_dict, total_pkg_expect = {}, 0.0
-    for pkg in packages_in_api_usage:
-        if pkg in inst_data:
-            pkg_prob = inst_data[pkg] / total_inst
-            pkg_prob_dict[pkg] = pkg_prob
-            total_pkg_expect += pkg_prob
-            for api_name in packages_in_api_usage[pkg]['system call']:
-                api_required_package[api_name].append(pkg)
-
-    if args.syscall:
-        filter_packages_by_syscall(args.syscall, packages_in_api_usage, args.source, args.maintainers)
-        return
-    
-    implemented_syscalls_source = args.implement_syscalls if args.implement_syscalls else LIBOS_URL
-    supported_syscalls = load_implemented_syscalls(implemented_syscalls_source)
-    num_implemented_syscalls = len(supported_syscalls)
-    num_stubbed_syscalls = 0
-    if args.stub_syscalls:
-        supported_syscalls.extend(load_excluded_syscalls(args.stub_syscalls))
-        num_stubbed_syscalls = len(supported_syscalls) - num_implemented_syscalls
-
-    wc, total_syscalls, not_supported_syscalls, _ = calculate_weighted_completeness(
-        supported_syscalls, packages_in_api_usage, inst_data, total_pkg_expect, pkg_prob_dict)
-    print(f'\nImplemented/Stubbed syscalls: {num_implemented_syscalls}/{num_stubbed_syscalls}')
-    print('Weighted Completeness = %.3lf %%' % wc)
-
+def rank_syscall_api_importance(packages_in_api_usage, pkg_prob_dict, total_syscalls, inst_data):
+    """Calculate and rank syscall importance."""
     importance_list = []
     for syscall in total_syscalls:
         probability_not_used = 1
@@ -178,9 +155,83 @@ def main():
                 probability_not_used *= (1- pkg_prob_dict[pkg])
         api_importance = 1 - probability_not_used
         importance_list.append((syscall, api_importance))
+    return sorted(importance_list, key=lambda x: x[1], reverse=True)
 
-    sorted_importance_list = sorted(importance_list, key=lambda x: x[1], reverse=True)
-    calculate_curve(sorted_importance_list, args.top, supported_syscalls, api_required_package)
+def print_unimplemented_syscall(ordered_syscalls, type, top_number, supported_syscalls, api_required_package, api_faked_work_packages):
+    """Print unimplemented syscalls"""
+    if type == "dynamic":
+        unit = 'wrks'
+    else:
+        unit = 'package'
+    top_syscalls = []
+    not_supported_count = 0
+    print(f'\nTop {top_number} not yet supported syscalls ordered by (API Importance)')
+    for s in ordered_syscalls:
+        top_syscalls.append(s[0])
+        if s[0] not in supported_syscalls:
+            if not_supported_count >= top_number:
+                break
+            not_supported_count += 1
+            faked_part_str = ""
+            if type == "dynamic":
+                faked_part_str = ", works faked in {} {}".format(len(api_faked_work_packages[s[0]]),unit)
+            print("{:<18} used in {:>2} {}{}".format(s[0], len(api_required_package[s[0]]),unit, faked_part_str))
+            #print("{:<18} ({:.5f}) used in {} {}{}".format(s[0], s[1], len(api_required_package[s[0]]),unit, faked_part_str)) # with API importance value
+
+def main():
+    args = parse_arguments()
+    # load api_usage data
+    if args.type == "static":
+        packages_in_api_usage = load_api_usage()
+        inst_data, total_inst, effective_total_inst = load_popularity_data(args.source, args.maintainers)
+    else:
+        packages_in_api_usage = load_api_usage('data/application_api_usage.json')
+        inst_data, total_inst = create_dummy_unweighted_pop(packages_in_api_usage)
+
+    # generate pkg_prob_dict and api_required_package for later use
+    pkg_prob_dict, total_pkg_expect = {}, 0.0
+    api_required_package = defaultdict(list)
+    api_faked_work_packages = defaultdict(list)
+    for pkg in packages_in_api_usage:
+        if pkg in inst_data:
+            pkg_prob = inst_data[pkg] / total_inst
+            pkg_prob_dict[pkg] = pkg_prob
+            total_pkg_expect += pkg_prob
+            for api_name in packages_in_api_usage[pkg]['system call']:
+                api_required_package[api_name].append(pkg)
+            if args.type != "static":
+                for api_name in packages_in_api_usage[pkg]['works faked']:
+                    api_faked_work_packages[api_name].append(pkg)
+
+    if args.syscall:
+        # list packages/apps using the specified syscall
+        if args.type == "static":
+            filter_packages_by_syscall(args.syscall, packages_in_api_usage, args.source, args.maintainers)
+        else:
+            filter_apps_by_syscall(args.syscall, packages_in_api_usage)
+        return
+    
+    # load implemented system calls from default URL or args -i
+    implemented_syscalls_source = args.implement_syscalls if args.implement_syscalls else LIBOS_URL
+    supported_syscalls = list(set(load_implemented_syscalls(implemented_syscalls_source)))
+    num_implemented_syscalls = len(supported_syscalls)
+
+    # load stubbed system calls that treated as dont-care
+    num_stubbed_syscalls = 0
+    if args.stub_syscalls:
+        stubbed_syscalls = load_excluded_syscalls(args.stub_syscalls)
+        supported_syscalls = list(set(supported_syscalls + stubbed_syscalls))
+        num_stubbed_syscalls = len(supported_syscalls) - num_implemented_syscalls
+
+    # calculate complete score
+    wc, total_syscalls, not_supported_syscalls, _ = calculate_completeness_score(
+        supported_syscalls, packages_in_api_usage, inst_data, total_pkg_expect, pkg_prob_dict)
+    print(f'\nImplemented/Stubbed syscalls: {num_implemented_syscalls}/{num_stubbed_syscalls}')
+    print('Weighted Completeness = %.3lf %%' % wc)
+
+    # analyze api importance
+    sorted_apis = rank_syscall_api_importance(packages_in_api_usage, pkg_prob_dict, total_syscalls, inst_data)
+    print_unimplemented_syscall(sorted_apis, args.type, args.top, supported_syscalls, api_required_package, api_faked_work_packages)
 
 if __name__ == "__main__":
     main()
